@@ -64,7 +64,9 @@ class LogStash::Web::Server < Sinatra::Base
         @backend = LogStash::Search::ElasticSearch.new(
           :host => backend_url.host,
           :port => backend_url.port,
-          :cluster => cluster_name
+          :cluster => cluster_name,
+          :bind_host => bind_host
+
         )
       when "twitter"
         require "logstash/search/twitter"
@@ -117,6 +119,10 @@ opts = OptionParser.new do |opts|
 
   opts.on("-p", "--port PORT", "Port on which to start webserver. Default is 9292.") do |port|
     settings.port = port.to_i
+  end
+
+  opts.on("-b", "--elasticsearch-bind-host ADDRESS", "Address on which to bind elastic search node.") do |addr|
+    settings.bind_host = addr
   end
 
   opts.on("-b", "--backend URL",
