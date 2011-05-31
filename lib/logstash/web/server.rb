@@ -65,7 +65,7 @@ class LogStash::Web::Server < Sinatra::Base
           :host => backend_url.host,
           :port => backend_url.port,
           :cluster => cluster_name,
-          :bind_host => bind_host
+          :bind_host => settings.bind_host
 
         )
       when "twitter"
@@ -93,7 +93,7 @@ class LogStash::Web::Server < Sinatra::Base
 end # class LogStash::Web::Server
 
 require "optparse"
-Settings = Struct.new(:daemonize, :logfile, :address, :port, :backend_url)
+Settings = Struct.new(:daemonize, :logfile, :address, :port, :backend_url, :bind_host)
 settings = Settings.new
 
 settings.address = "0.0.0.0"
@@ -121,7 +121,7 @@ opts = OptionParser.new do |opts|
     settings.port = port.to_i
   end
 
-  opts.on("-b", "--elasticsearch-bind-host ADDRESS", "Address on which to bind elastic search node.") do |addr|
+  opts.on("-B", "--elasticsearch-bind-host ADDRESS", "Address on which to bind elastic search node.") do |addr|
     settings.bind_host = addr
   end
 
