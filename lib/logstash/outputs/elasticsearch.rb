@@ -1,8 +1,14 @@
 require "logstash/namespace"
 require "logstash/outputs/base"
 
-# TODO(sissel): Remove old cruft from pre-jruby
-# TODO(sissel): Support river again?
+# This output lets you store logs in elasticsearch and is the most recommended
+# output for logstash. If you plan on using the logstash web interface, you'll
+# need to use this output.
+#
+#   *NOTE*: You must use the same version of elasticsearch server that logstash
+#   uses for it's client. Currently we use elasticsearch 0.16.0
+#
+# You can learn more about elasticseasrch at <http://elasticsearch.org>
 class LogStash::Outputs::Elasticsearch < LogStash::Outputs::Base
 
   # http://host/index/type
@@ -36,6 +42,12 @@ class LogStash::Outputs::Elasticsearch < LogStash::Outputs::Base
   # The name/address of the host to bind to for ElasticSearch clustering
   config :bind_host, :validate => :string
 
+  # Run the elasticsearch server embedded in this process.
+  # This option is useful if you want to run a single logstash process that
+  # handles log processing and indexing; it saves you from needing to run
+  # a separate elasticsearch process.
+  config :embedded, :validate => :boolean, :default => false
+
   # TODO(sissel): Config for river?
 
   public
@@ -48,17 +60,51 @@ class LogStash::Outputs::Elasticsearch < LogStash::Outputs::Base
         require jar
     end
 
+    if @embedded
+      %w(host cluster bind_host).each do |name|
+        if instance_variable_get("@#{name}")
+          @logger.error("outputs/elasticsearch: You cannot specify " \
+                        "'embedded => true' and also set '#{name}'")
+          raise "Invalid configuration detected. Please fix."
+        end
+      end
+
+      # Start elasticsearch local.
+      start_local_elasticsearch
+    end
+
     gem "jruby-elasticsearch", ">= 0.0.3"
     require "jruby-elasticsearch"
 
     @logger.info(:message => "New ElasticSearch output", :cluster => @cluster,
-                 :host => @host, :port => @port)
+                 :host => @host, :port => @port, :embedded => @embedded)
     @pending = []
     @callback = self.method(:receive_native)
-    @client = ElasticSearch::Client.new(:cluster => @cluster,
-                                        :host => @host, :port => @port,
-                                        :bind_host => @bind_host)
+    options = {
+      :cluster => @cluster,
+      :host => @host,
+      :port => @port,
+      :bind_host => @bind_host,
+    }
+
+    if (@embedded)
+      options[:type] = :local
+    else
+      options[:type] = :node
+      # TODO(sissel): Support 'transport client'
+    end
+
+    @client = ElasticSearch::Client.new(options)
   end # def register
+
+  protected
+  def start_local_elasticsearch
+    @logger.info("Starting embedded ElasticSearch local node.")
+    builder = org.elasticsearch.node.NodeBuilder.nodeBuilder
+    builder.local(true)
+    @embedded_elasticsearch = builder.node
+    @embedded_elasticsearch.start
+  end # def start_local_elasticsearch
 
   # TODO(sissel): Needs migration to  jrubyland
   public

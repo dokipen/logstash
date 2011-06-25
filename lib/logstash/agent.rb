@@ -27,7 +27,7 @@ class LogStash::Agent
   attr_accessor :logger
 
   # flags
-  attr_reader :config_file
+  attr_reader :config_path
   attr_reader :daemonize
   attr_reader :logfile
   attr_reader :verbose
@@ -62,17 +62,23 @@ class LogStash::Agent
     @logger = LogStash::Logger.new(target)
   end # def log_to
 
-  public
-  def argv=(argv)
-    @argv = argv
-  end
-
   private
   def options(opts)
-    opts.on("-f CONFIGFILE", "--config CONFIGFILE",
-            "Load the logstash config from a specific file") do |arg|
-      @config_file = arg
-    end
+    opts.on("-f CONFIGPATH", "--config CONFIGPATH",
+            "Load the logstash config from a specific file or directory. " \
+            "If a direcory is given instead of a file, all files in that " \
+            "directory will be concatonated in lexicographical order and " \
+            "then parsed as a single config file.") do |arg|
+      @config_path = arg
+    end # -f / --config
+
+    opts.on("-e CONFIGSTRING",
+            "Use the given string as the configuration data. Same syntax as " \
+            "the config file. If not input is specified, " \
+            "'stdin { type => stdin }' is default. If no output is " \
+            "specified, 'stdout { debug => true }}' is default.") do |arg|
+      @config_string = arg
+    end # -e
 
     opts.on("-d", "--daemonize", "Daemonize (default is run in foreground)") do 
       @daemonize = true
@@ -96,22 +102,22 @@ class LogStash::Agent
 
   # Parse options.
   private
-  def parse_options
+  def parse_options(args)
     @opts = OptionParser.new
 
     # Step one is to add agent flags.
     options(@opts)
 
     # TODO(sissel): Check for plugin_path flags, add them to @plugin_paths.
-    @argv.each_with_index do |arg, index|
+    args.each_with_index do |arg, index|
       next unless arg =~ /^(?:-p|--pluginpath)(?:=(.*))?$/
       path = $1
       if path.nil?
-        path = @argv[index + 1]
+        path = args[index + 1]
       end
 
       @plugin_paths += path.split(":")
-    end # @argv.each
+    end # args.each
 
     # At this point, we should load any plugin-specific flags.
     # These are 'unknown' flags that begin --<plugin>-flag
@@ -131,7 +137,7 @@ class LogStash::Agent
     # --amqp-foo flag. This might cause confusion, but it seems reasonable for
     # now that any same-named component will have the same flags.
     plugins = []
-    @argv.each do |arg|
+    args.each do |arg|
       # skip things that don't look like plugin flags
       next unless arg =~ /^--[A-z0-9]+-/ 
       name = arg.split("-")[2]  # pull the plugin name out
@@ -167,25 +173,29 @@ class LogStash::Agent
     end # @remaining_args.each 
    
     begin
-      @opts.parse!(@argv)
+      remainder = @opts.parse(args)
     rescue OptionParser::InvalidOption => e
       @logger.info e
       raise e
     end
  
-    return true
+    return remainder
   end # def parse_options
 
   private
   def configure
-    if @config_file.nil? || @config_file.empty?
+    if @config_path && @config_string
+      @logger.fatal "Can't use -f and -e at the same time"
+      raise "Configuration problem"
+    elsif (@config_path.nil? || @config_path.empty?) && @config_string.nil?
       @logger.fatal "No config file given. (missing -f or --config flag?)"
       @logger.fatal @opts.help
       raise "Configuration problem"
     end
 
-    if !File.exist?(@config_file)
-      @logger.fatal "Config file '#{@config_file}' does not exist."
+    #if @config_path and !File.exist?(@config_path)
+    if @config_path and Dir.glob(@config_path).length == 0
+      @logger.fatal "Config file '#{@config_path}' does not exist."
       raise "Configuration problem"
     end
 
@@ -217,23 +227,53 @@ class LogStash::Agent
   end # def configure
 
   public
-  def run(&block)
+  def run(args, &block)
     LogStash::Util::set_thread_name(self.class.name)
     register_signal_handlers
 
-    ok = parse_options
-    if !ok
+    remaining = parse_options(args)
+    if remaining == false
       raise "Option parsing failed. See error log."
     end
 
     configure
 
     # Load the config file
-    config = LogStash::Config::File.new(@config_file)
+    if @config_path
+      # Support directory of config files.
+      # https://logstash.jira.com/browse/LOGSTASH-106
+      if File.directory?(@config_path)
+        @logger.debug("Loading '#{@config_path}' as directory")
+        paths = Dir.glob(File.join(@config_path, "*")).sort
+      else
+        # Get a list of files matching a glob. If the user specified a single
+        # file, then this will only have one match and we are still happy.
+        paths = Dir.glob(@config_path)
+      end
 
-    run_with_config(config, &block)
+      concatconfig = []
+      paths.each do |path|
+        concatconfig << File.new(path).read
+      end
+      config = LogStash::Config::File.new(nil, concatconfig.join("\n"))
+    elsif @config_string
+      # Given a config string by the user (via the '-e' flag)
+      config = LogStash::Config::File.new(nil, @config_string)
+    end
+
+    @thread = Thread.new do
+      run_with_config(config, &block)
+    end
+
+    return remaining
   end # def run
 
+  public
+  def wait
+    @thread.join
+  end
+
+  public
   def run_with_config(config)
     config.parse do |plugin|
       # 'plugin' is a has containing:
@@ -260,6 +300,26 @@ class LogStash::Agent
           exit 1
       end # case type
     end # config.parse
+
+    # If we are given a config string (run usually with 'agent -e "some config string"')
+    # then set up some defaults.
+    if @config_string
+      require "logstash/inputs/stdin"
+      require "logstash/outputs/stdout"
+
+      # set defaults if necessary
+      
+      # All filters default to 'stdin' type
+      @filters.each do |filter|
+        filter.type = "stdin" if filter.type.nil?
+      end
+      
+      # If no inputs are specified, use stdin by default.
+      @inputs = [LogStash::Inputs::Stdin.new("type" => [ "stdin" ])] if @inputs.length == 0
+
+      # If no outputs are specified, use stdout in debug mode.
+      @outputs = [LogStash::Outputs::Stdout.new("debug" => [ "true" ])] if @outputs.length == 0
+    end
 
     if @inputs.length == 0 or @outputs.length == 0
       raise "Must have both inputs and outputs configured."
