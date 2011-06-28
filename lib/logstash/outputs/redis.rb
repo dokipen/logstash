@@ -93,8 +93,8 @@ class LogStash::Outputs::Redis < LogStash::Outputs::Base
 
   public
   def receive(event)
-    if !@tags.empty?
-      if (event.tags - @tags).size == 0
+    @tags.each do |tag|
+      if not event.tags.include?tag
         # Skip events that have no tags in common with what we were configured
         return
       end
