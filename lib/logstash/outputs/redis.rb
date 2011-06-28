@@ -43,6 +43,11 @@ class LogStash::Outputs::Redis < LogStash::Outputs::Base
   # TODO set required true
   config :data_type, :validate => [ "list", "channel" ], :required => false
 
+  # Only handle events with any of these tags. Optional.
+  # If not specified, will process all events.
+  config :tags, :validate => :array, :default => []
+
+
   public
   def register
     require 'redis'
@@ -88,6 +93,13 @@ class LogStash::Outputs::Redis < LogStash::Outputs::Base
 
   public
   def receive(event)
+    if !@tags.empty?
+      if (event.tags - @tags).size == 0
+        # Skip events that have no tags in common with what we were configured
+        return
+      end
+    end
+
     begin
       @redis ||= connect
       if @data_type == 'list'
